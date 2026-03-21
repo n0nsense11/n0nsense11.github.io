@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>图片混淆与反混淆</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #1a1a2e; color: #eee; min-height: 100vh; padding: 20px; }
+  h1 { text-align: center; color: #00d4ff; margin-bottom: 20px; }
+  .container { max-width: 1200px; margin: 0 auto; }
+  .panel { background: #16213e; border-radius: 12px; padding: 20px; margin-bottom: 20px; }
+  .panel h2 { color: #e94560; margin-bottom: 15px; font-size: 1.1rem; }
+  .controls { display: flex; flex-wrap: wrap; gap: 15px; align-items: center; margin-bottom: 15px; }
+  label { color: #aaa; }
+  input[type="number"], input[type="text"] { background: #0f3460; border: 1px solid #00d4ff; border-radius: 6px; padding: 8px 12px; color: #fff; width: 120px; }
+  input[type="text"] { width: 200px; }
+  button { background: #e94560; border: none; border-radius: 6px; padding: 10px 20px; color: #fff; cursor: pointer; font-weight: bold; transition: background 0.2s; }
+  button:hover { background: #ff6b6b; }
+  button:disabled { background: #555; cursor: not-allowed; }
+  .preview { display: flex; gap: 20px; flex-wrap: wrap; justify-content: center; margin-top: 20px; }
+  .preview-item { text-align: center; }
+  .preview-item img, .preview-item canvas { max-width: 400px; max-height: 350px; border: 2px solid #00d4ff; border-radius: 8px; }
+  .preview-item p { margin-top: 8px; color: #aaa; font-size: 0.9rem; }
+  .key-display { background: #0f3460; border-radius: 6px; padding: 12px; margin: 10px 0; word-break: break-all; font-family: monospace; font-size: 0.85rem; color: #00d4ff; }
+  .info { background: #0f3460; border-radius: 6px; padding: 10px; margin-top: 10px; font-size: 0.85rem; color: #aaa; }
+  .status { color: #4ade80; margin-top: 5px; }
+  input[type="file"] { display: none; }
+  .file-btn { background: #0f3460; border: 2px dashed #00d4ff; border-radius: 6px; padding: 20px; text-align: center; cursor: pointer; transition: background 0.2s; }
+  .file-btn:hover { background: #1a4a7a; }
+  .file-list { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; }
+  .file-chip { background: #e94560; border-radius: 20px; padding: 5px 12px; font-size: 0.8rem; cursor: pointer; }
+  .file-chip:hover { background: #ff6b6b; }
+  #workCanvas, #tempCanvas { display: none; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>🖼️ 图片混淆与反混淆</h1>
+
+  <div class="panel">
+    <h2>📁 选择图片</h2>
+    <div class="file-btn" onclick="document.getElementById('fileInput').click()">
+      点击选择图片文件（支持 JPG/PNG/WebP/GIF）
+    </div>
+    <input type="file" id="fileInput" accept="image/*" multiple onchange="handleFiles(this.files)">
+    <div id="fileList" class="file-list"></div>
+
+  </div>
+
+  <div class="panel">
+    <h2>⚙️ 混淆设置</h2>
+    <div class="controls">
+      <div>
+        <label>区块大小 (px):</label>
+        <input type="number" id="blockSize" value="32" min="8" max="128" step="4">
+      </div>
+      <div>
+        <label>随机种子 (可选):</label>
+        <input type="text" id="seedInput" placeholder="留空自动生成">
+      </div>
+      <button id="scrambleBtn" onclick="scrambleImage()" disabled>🔀 混淆图片</button>
+      <button id="downloadBtn" onclick="downloadScrambled()" disabled style="background:#4ade80">💾 下载混淆图</button>
+    </div>
+    <div id="keyDisplay" class="key-display" style="display:none"></div>
+    <div id="status1" class="status"></div>
+  </div>
+
+  <div class="panel">
+    <h2>🔓 反混淆设置</h2>
+    <div class="controls">
+      <div>
+        <label>输入密钥:</label>
+        <input type="text" id="unscrambleKey" placeholder="输入密钥或上传混淆图自动提取">
+      </div>
+      <button id="unscrambleBtn" onclick="unscrambleFromKey()">🔓 用密钥反混淆</button>
+      <button onclick="document.getElementById('scrambledInput').click()" style="background:#0f3460;border:2px solid #00d4ff;">📤 上传混淆图(自动提取密钥)</button>
+      <button id="downloadUnscrambledBtn" onclick="downloadUnscrambled()" disabled style="background:#4ade80">💾 下载还原图</button>
+      <input type="file" id="scrambledInput" accept="image/*" onchange="loadScrambledImage(this.files[0])">
+    </div>
+    <div id="status2" class="status"></div>
+  </div>
+
+  <div class="preview">
+    <div class="preview-item">
+      <div id="originalPreview"></div>
+      <p>原始图片</p>
+    </div>
+    <div class="preview-item">
+      <div id="scrambledPreview"></div>
+      <p>混淆图片</p>
+    </div>
+    <div class="preview-item">
+      <div id="unscrambledPreview"></div>
+      <p>还原图片</p>
+    </div>
+  </div>
+</div>
+
+<canvas id="workCanvas"></canvas>
+<canvas id="tempCanvas"></canvas>
+
+<script>
+// ============ 核心混淆算法 ============
+
+// 改进的 mulberry32 PRNG - 产生更均匀的随机序列
+function mulberry32(seed) {
+  return function() {
+    let t = seed += 0x6D2B79F5;
+    t = Math.imul(t ^ t >>> 15, t | 1);
+    t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+// 字符串哈希转数值
+function hashString(str) {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash;
+  }
+  return Math.abs(hash);
+}
+
+// 生成随机密钥
+function generateKey() {
+  const arr = new Uint8Array(16);
+  crypto.getRandomValues(arr);
+  return Array.from(arr, b => b.toString(16).padStart(2, '0')).join('').substring(0, 24);
+}
+
+// 将密钥编码到像素数据中（最后一行 + 最后几列）
+function encodeKeyToPixels(pixels, width, key) {
+  const data = new Uint8ClampedArray(pixels);
+  const hash = hashString(key);
+  const len = key.length;
+  
+  // 在最后一行像素中编码: [长度, key字符..., hash高16位, hash低16位]
+  const lastRowStart = (data.length / 4 - width) * 4;
+  
+  // 第一个像素存长度
+  data[lastRowStart] = len;
+  data[lastRowStart + 1] = 0;
+  data[lastRowStart + 2] = 0;
+  data[lastRowStart + 3] = 255;
+  
+  // 存储key的每个字符
+  for (let i = 0; i < len; i++) {
+    const idx = lastRowStart + 4 + i * 4;
+    data[idx] = key.charCodeAt(i);
+    data[idx + 1] = 0;
+    data[idx + 2] = 0;
+    data[idx + 3] = 255;
+  }
+  
+  // 存储hash校验
+  const hashPos = lastRowStart + 4 + len * 4;
+  data[hashPos] = (hash >> 8) & 0xFF;
+  data[hashPos + 1] = hash & 0xFF;
+  data[hashPos + 2] = 0;
+  data[hashPos + 3] = 255;
+  
+  return new ImageData(data, width);
+}
+
+// 从像素数据中提取密钥
+function decodeKeyFromPixels(pixels, width) {
+  const data = new Uint8ClampedArray(pixels);
+  const lastRowStart = (data.length / 4 - width) * 4;
+  
+  // 读取长度
+  const len = data[lastRowStart];
+  if (len < 1 || len > 100) return null;
+  
+  // 读取key
+  let key = '';
+  for (let i = 0; i < len; i++) {
+    const idx = lastRowStart + 4 + i * 4;
+    if (data[idx + 3] !== 255) return null;
+    key += String.fromCharCode(data[idx]);
+  }
+  
+  // 验证hash
+  const hashPos = lastRowStart + 4 + len * 4;
+  const storedHash = (data[hashPos] << 8) | data[hashPos + 1];
+  const computedHash = hashString(key) & 0xFFFF;
+  
+  if (storedHash !== computedHash) return null;
+  return key;
+}
+
+// 打乱区块顺序（保留最后一行和最后一列用于密钥存储）
+function scrambleBlocks(imgData, width, height, blockSize, rng) {
+  const bw = Math.ceil(width / blockSize);
+  const bh = Math.ceil(height / blockSize);
+  
+  // 收集可打乱的区块（排除最后一行和最后一列）
+  const movableBlocks = [];
+  const fixedBlocks = new Set();
+  
+  for (let by = 0; by < bh; by++) {
+    for (let bx = 0; bx < bw; bx++) {
+      // 最后一行或最后一列的区块不参与打乱（保留用于存储密钥）
+      if (by === bh - 1 || bx === bw - 1) {
+        fixedBlocks.add(`${bx},${by}`);
+      } else {
+        movableBlocks.push({ bx, by });
+      }
+    }
+  }
+  
+  // 对可移动区块进行 Fisher-Yates 洗牌
+  const shuffled = [...movableBlocks];
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+  
+  // 建立映射：原始位置 → 目标位置
+  const mapping = new Map();
+  movableBlocks.forEach((block, idx) => {
+    mapping.set(`${block.bx},${block.by}`, shuffled[idx]);
+  });
+  // 固定区块映射到自身
+  fixedBlocks.forEach(key => {
+    const [bx, by] = key.split(',').map(Number);
+    mapping.set(key, { bx, by });
+  });
+  
+  // 创建输出图像
+  const outData = new ImageData(width, height);
+  
+  // 移动区块
+  for (const [key, dest] of mapping) {
+    const [bx, by] = key.split(',').map(Number);
+    
+    for (let dy = 0; dy < blockSize && (by * blockSize + dy) < height; dy++) {
+      for (let dx = 0; dx < blockSize && (bx * blockSize + dx) < width; dx++) {
+        const srcIdx = ((by * blockSize + dy) * width + (bx * blockSize + dx)) * 4;
+        const destIdx = ((dest.by * blockSize + dy) * width + (dest.bx * blockSize + dx)) * 4;
+        
+        outData.data[destIdx] = imgData.data[srcIdx];
+        outData.data[destIdx + 1] = imgData.data[srcIdx + 1];
+        outData.data[destIdx + 2] = imgData.data[srcIdx + 2];
+        outData.data[destIdx + 3] = imgData.data[srcIdx + 3];
+      }
+    }
+  }
+  
+  return outData;
+}
+
+// 反打乱（逆向操作）
+function unscrambleBlocks(imgData, width, height, blockSize, rng) {
+  const bw = Math.ceil(width / blockSize);
+  const bh = Math.ceil(height / blockSize);
+  
+  // 收集可打乱的区块（排除最后一行和最后一列）
+  const movableBlocks = [];
+  const fixedBlocks = new Set();
+  
+  for (let by = 0; by < bh; by++) {
+    for (let bx = 0; bx < bw; bx++) {
+      if (by === bh - 1 || bx === bw - 1) {
+        fixedBlocks.add(`${bx},${by}`);
+      } else {
+        movableBlocks.push({ bx, by });
+      }
+    }
+  }
+  
+  // 使用相同种子生成相同洗牌顺序
+  const shuffled = [...movableBlocks];
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+  
+  // 反向映射
+  const reverseMapping = new Map();
+  movableBlocks.forEach((block, idx) => {
+    reverseMapping.set(`${shuffled[idx].bx},${shuffled[idx].by}`, block);
+  });
+  fixedBlocks.forEach(key => {
+    const [bx, by] = key.split(',').map(Number);
+    reverseMapping.set(key, { bx, by });
+  });
+  
+  const outData = new ImageData(width, height);
+  
+  for (const [key, dest] of reverseMapping) {
+    const [bx, by] = key.split(',').map(Number);
+    
+    for (let dy = 0; dy < blockSize && (by * blockSize + dy) < height; dy++) {
+      for (let dx = 0; dx < blockSize && (bx * blockSize + dx) < width; dx++) {
+        const srcIdx = ((by * blockSize + dy) * width + (bx * blockSize + dx)) * 4;
+        const destIdx = ((dest.by * blockSize + dy) * width + (dest.bx * blockSize + dx)) * 4;
+        
+        outData.data[destIdx] = imgData.data[srcIdx];
+        outData.data[destIdx + 1] = imgData.data[srcIdx + 1];
+        outData.data[destIdx + 2] = imgData.data[srcIdx + 2];
+        outData.data[destIdx + 3] = imgData.data[srcIdx + 3];
+      }
+    }
+  }
+  
+  return outData;
+}
+
+// ============ 状态管理 ============
+
+let originalImage = null;
+let scrambledImageData = null;
+let unscrambledImageData = null;
+let currentKey = null;
+let originalFileName = '';
+
+async function handleFiles(files) {
+  const list = document.getElementById('fileList');
+  list.innerHTML = '';
+  
+  for (const file of files) {
+    const chip = document.createElement('span');
+    chip.className = 'file-chip';
+    chip.textContent = file.name;
+    chip.onclick = () => loadImage(file);
+    list.appendChild(chip);
+  }
+  
+  if (files.length > 0) {
+    await loadImage(files[0]);
+  }
+}
+
+async function loadImage(file) {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        originalImage = img;
+        originalFileName = file.name.replace(/\.[^.]+$/, '');
+        
+        // 缩放显示
+        const display = document.getElementById('originalPreview');
+        const canvas = document.createElement('canvas');
+        const scale = Math.min(400 / img.width, 350 / img.height, 1);
+        canvas.width = img.width * scale;
+        canvas.height = img.height * scale;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        display.innerHTML = '';
+        display.appendChild(canvas);
+        
+        document.getElementById('scrambleBtn').disabled = false;
+        document.getElementById('status1').textContent = `已加载: ${file.name} (${img.width}x${img.height})`;
+        
+        // 重置反混淆相关状态
+        unscrambledImageData = null;
+        document.getElementById('unscrambledPreview').innerHTML = '';
+        document.getElementById('downloadUnscrambledBtn').disabled = true;
+        document.getElementById('status2').textContent = '';
+        
+        resolve();
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+async function loadScrambledImage(file) {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.getElementById('workCanvas');
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0);
+        const imgData = ctx.getImageData(0, 0, img.width, img.height);
+        
+        // 尝试提取密钥
+        const key = decodeKeyFromPixels(imgData.data, img.width);
+        
+        if (key) {
+          document.getElementById('unscrambleKey').value = key;
+          document.getElementById('status2').textContent = `✅ 已自动提取密钥: ${key}`;
+        } else {
+          document.getElementById('status2').textContent = '⚠️ 无法从图片中提取密钥，请手动输入';
+        }
+        
+        // 显示混淆图预览
+        const display = document.getElementById('scrambledPreview');
+        const previewCanvas = document.createElement('canvas');
+        const scale = Math.min(400 / img.width, 350 / img.height, 1);
+        previewCanvas.width = img.width * scale;
+        previewCanvas.height = img.height * scale;
+        const previewCtx = previewCanvas.getContext('2d');
+        previewCtx.drawImage(img, 0, 0, previewCanvas.width, previewCanvas.height);
+        display.innerHTML = '';
+        previewCanvas.className = 'preview-canvas';
+        display.appendChild(previewCanvas);
+        
+        // 保存用于后续反混淆
+        scrambledImageData = canvas.toDataURL('image/png');
+        
+        resolve();
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+async function scrambleImage() {
+  if (!originalImage) return;
+  
+  const blockSize = parseInt(document.getElementById('blockSize').value);
+  const seedText = document.getElementById('seedInput').value.trim();
+  
+  // 生成或使用密钥
+  currentKey = seedText || generateKey();
+  const seed = hashString(currentKey);
+  const rng = mulberry32(seed);
+  
+  document.getElementById('status1').textContent = '正在混淆...';
+  
+  await new Promise(r => setTimeout(r, 50)); // 让UI更新
+  
+  const canvas = document.getElementById('workCanvas');
+  canvas.width = originalImage.width;
+  canvas.height = originalImage.height;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(originalImage, 0, 0);
+  
+  const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  
+  // 混淆
+  const scrambled = scrambleBlocks(imgData, canvas.width, canvas.height, blockSize, rng);
+  
+  // 在最后一行像素中编码密钥
+  const withKey = encodeKeyToPixels(scrambled.data, canvas.width, currentKey);
+  
+  // 绘制结果
+  ctx.putImageData(withKey, 0, 0);
+  
+  // 显示预览
+  const display = document.getElementById('scrambledPreview');
+  const previewCanvas = document.createElement('canvas');
+  const scale = Math.min(400 / canvas.width, 350 / canvas.height, 1);
+  previewCanvas.width = canvas.width * scale;
+  previewCanvas.height = canvas.height * scale;
+  const previewCtx = previewCanvas.getContext('2d');
+  previewCtx.drawImage(canvas, 0, 0, previewCanvas.width, previewCanvas.height);
+  display.innerHTML = '';
+  display.appendChild(previewCanvas);
+  
+  scrambledImageData = canvas.toDataURL('image/png');
+  
+  // 显示密钥
+  const keyDisplay = document.getElementById('keyDisplay');
+  keyDisplay.style.display = 'block';
+  keyDisplay.innerHTML = `<strong>🔑 密钥:</strong> ${currentKey}<br><small>混淆图已自动嵌入密钥，下载后可直接上传反混淆</small>`;
+  
+  document.getElementById('downloadBtn').disabled = false;
+  document.getElementById('status1').textContent = `✅ 混淆完成！区块大小: ${blockSize}px`;
+}
+
+async function unscrambleFromKey() {
+  if (!scrambledImageData) {
+    document.getElementById('status2').textContent = '⚠️ 请先混淆一张图片或上传混淆图';
+    return;
+  }
+  
+  const key = document.getElementById('unscrambleKey').value.trim();
+  if (!key) {
+    document.getElementById('status2').textContent = '⚠️ 请输入密钥';
+    return;
+  }
+  
+  const blockSize = parseInt(document.getElementById('blockSize').value);
+  const seed = hashString(key);
+  const rng = mulberry32(seed);
+  
+  document.getElementById('status2').textContent = '正在反混淆...';
+  
+  // 加载混淆图
+  const img = new Image();
+  try {
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = () => reject(new Error('图片加载失败'));
+      img.src = scrambledImageData;
+    });
+  } catch (e) {
+    document.getElementById('status2').textContent = '⚠️ ' + e.message;
+    return;
+  }
+  
+  const canvas = document.getElementById('workCanvas');
+  canvas.width = img.width;
+  canvas.height = img.height;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(img, 0, 0);
+  const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  
+  // 反混淆
+  const unscrambled = unscrambleBlocks(imgData, canvas.width, canvas.height, blockSize, rng);
+  
+  ctx.putImageData(unscrambled, 0, 0);
+  
+  // 保存完整画质用于下载
+  unscrambledImageData = canvas.toDataURL('image/png');
+  
+  // 显示预览
+  const display = document.getElementById('unscrambledPreview');
+  const previewCanvas = document.createElement('canvas');
+  const scale = Math.min(400 / canvas.width, 350 / canvas.height, 1);
+  previewCanvas.width = canvas.width * scale;
+  previewCanvas.height = canvas.height * scale;
+  const previewCtx = previewCanvas.getContext('2d');
+  previewCtx.drawImage(canvas, 0, 0, previewCanvas.width, previewCanvas.height);
+  display.innerHTML = '';
+  previewCanvas.className = 'preview-canvas';
+  display.appendChild(previewCanvas);
+  
+  document.getElementById('status2').textContent = '✅ 反混淆完成！';
+  document.getElementById('downloadUnscrambledBtn').disabled = false;
+}
+
+function downloadScrambled() {
+  if (!scrambledImageData) return;
+  
+  const link = document.createElement('a');
+  link.download = `${originalFileName}_scrambled.png`;
+  link.href = scrambledImageData;
+  link.click();
+}
+
+function downloadUnscrambled() {
+  if (!unscrambledImageData) return;
+  
+  const link = document.createElement('a');
+  link.download = `${originalFileName}_restored.png`;
+  link.href = unscrambledImageData;
+  link.click();
+}
+</script>
+</body>
+</html>
